@@ -3,7 +3,3 @@
 Model: typhoon2-qwen2.5
 Developed with VS Code 
 Description: Built a legal chatbot with Langraph and typhoon2 integrated with RAG model to answer PDPA-related questions.
-
-
-
-![Uploading 5DEAD9FD-C45E-4B60-B24F-F1CA2B228F3E.png…]()
