@@ -1,6 +1,6 @@
 WIP!!!
 
-Model: typhoon2-qwen2.5
+Model: typhoon2.1 gemma3 4b
 Developed with: VS Code
 Description:
 Developed a legal chatbot designed to answer PDPA-related questions. The system was built using LangGraph and the Typhoon2 model integrated with a Retrieval-Augmented Generation (RAG) pipeline. To enhance retrieval accuracy, semantic chunking was applied to preprocess legal documents, splitting text into meaningful segments based on context rather than fixed length. This improves the relevance of retrieved information, enabling the chatbot to provide more precise and context-aware responses to users.
