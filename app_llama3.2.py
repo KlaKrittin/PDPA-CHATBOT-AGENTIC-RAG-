@@ -478,12 +478,51 @@ else:
 
 prompt = st.chat_input(prompt_placeholder)
 
+# Guardrail (UI layer) ก่อนเข้าสู่ workflow
 if prompt:
-    # 1. แสดงข้อความของผู้ใช้ทันที
+    print(f"🔍 App: Processing prompt: {prompt}")
+    
+    # แสดงคำถามของผู้ใช้ก่อนที่จะตรวจสอบ SecurityFilter
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
     
+    _SecurityFilter = None
+    try:
+        from src.agentic_rag.tools.security_filter import SecurityFilter as _SecurityFilter
+        print("✅ App: SecurityFilter imported successfully")
+    except Exception as e:
+        print(f"❌ App: SecurityFilter import failed: {e}")
+        try:
+            from agentic_rag.tools.security_filter import SecurityFilter as _SecurityFilter
+            print("✅ App: SecurityFilter imported successfully (fallback)")
+        except Exception as e2:
+            print(f"❌ App: SecurityFilter import failed (fallback): {e2}")
+            _SecurityFilter = None
+    if _SecurityFilter is not None:
+        try:
+            print(f"🔍 SecurityFilter: Processing prompt: {prompt}")
+            _ui_sf = _SecurityFilter()
+            _ui_filter = _ui_sf.filter_user_input(prompt or "")
+            print(f"🔍 SecurityFilter result: {_ui_filter}")
+            
+            if not _ui_filter.get("should_respond", True):
+                print("🔴 SecurityFilter: BLOCKING prompt")
+                st.session_state.messages.append({"role": "assistant", "content": _ui_filter.get("response_message") or "ตรวจพบเนื้อหาไม่เหมาะสมในคำถาม ⚠️ กรุณาพิมพ์ใหม่โดยใช้ถ้อยคำที่สุภาพ"})
+                with st.chat_message("assistant"):
+                    st.markdown(_ui_filter.get("response_message") or "ตรวจพบเนื้อหาไม่เหมาะสมในคำถาม ⚠️ กรุณาพิมพ์ใหม่โดยใช้ถ้อยคำที่สุภาพ")
+                prompt = None
+            else:
+                print("✅ SecurityFilter: ALLOWING prompt")
+        except Exception as e:
+            # ถ้าตรวจไม่สำเร็จ ให้ข้ามและใช้ guardrail ระดับ workflow แทน
+            print(f"❌ SecurityFilter error: {e}")
+            st.error(f"SecurityFilter error: {e}")
+            pass
+    else:
+        print("❌ SecurityFilter: Not available")
+
+if prompt:
     # 2. รับการตอบกลับจาก LangGraph
     conversation_context = build_conversation_context(st.session_state.messages)
     with st.chat_message("assistant"):
