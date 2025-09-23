@@ -146,6 +146,19 @@ def build_langgraph_workflow(pdf_tool=None, use_knowledge_base=True):
         web_text = ""
         references_text = ""  # เพิ่มบรรทัดนี้เพื่อป้องกัน error
         
+        # Helper: keep only readable characters and cap length
+        import re
+        def _clean_text(text: str, max_len: int = 4000) -> str:
+            if not isinstance(text, str):
+                text = str(text)
+            # Remove binary-looking sequences and non-printable chars
+            text = re.sub(r"[^\t\n\r\x20-\x7E\u0E00-\u0E7F\u2013\u2014\u2018\u2019\u201C\u201D]", " ", text)
+            # Collapse whitespace
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) > max_len:
+                return text[:max_len] + " …(ตัดทอน)"
+            return text
+        
         if web_search_tool:
             try:
                 print(f"🔍 Trying to call SerperDevTool with query: '{query}'")
@@ -214,24 +227,31 @@ def build_langgraph_workflow(pdf_tool=None, use_knowledge_base=True):
                     web_text_parts = []
                     references = []
                     web_contents = []
+                    combined_chars = 0
+                    combined_char_budget = 12000
                     for i, result in enumerate(results):  # ดึงเนื้อหาทุกลิงก์
                         title = result.get('title', '')
                         snippet = result.get('snippet', '')
                         link = result.get('link', '')
                         print(f"🌐 [{i+1}] อ่านลิงก์: {link}")
-                        web_text_parts.append(f"{i+1}. {title}\n{snippet}")
+                        web_text_parts.append(f"{i+1}. {title}\n{_clean_text(snippet, 600)}")
                         references.append(f"[{i+1}] {title}: {link}")
                         # ดึงเนื้อหาทั้งหมดจากเว็บ
                         from src.agentic_rag.tools.serper_tool import SerperDevTool
-                        content = SerperDevTool.extract_web_content(link, max_chars=1000000)
-                        print(f"    ↳ ความยาวเนื้อหาที่ดึงได้: {len(content)} ตัวอักษร")
-                        print(f"    ↳ เนื้อหาที่ดึงได้จากลิงก์นี้:\n{content}")
-                        web_contents.append(f"---\n{title}\n{link}\n{content}\n")
+                        content = SerperDevTool.extract_web_content(link, max_chars=200000)
+                        cleaned = _clean_text(content, 4000)
+                        combined_chars += len(cleaned)
+                        print(f"    ↳ ความยาวหลังทำความสะอาด: {len(cleaned)} ตัวอักษร")
+                        # Append only within budget to avoid overwhelming LLM
+                        if combined_chars <= combined_char_budget:
+                            web_contents.append(f"---\n{title}\n{link}\n{cleaned}\n")
+                        else:
+                            web_contents.append(f"---\n{title}\n{link}\n(ตัดทอนเนื้อหาเพื่อจำกัดขนาด)\n")
                     web_text = '\n\n'.join(web_text_parts) + '\n\n' + '\n'.join(web_contents)
                     references_text = '\n'.join(references)
                     print(f"✅ [LangGraph] Web search successful, found {len(results)} results")
                     print(f"📚 References: {len(references)} sources")
-                    print(f"📝 ข้อความรวมที่ใช้ตอบ (web_text):\n{web_text}")
+                    # Do not print web_text to avoid huge console noise / binary
                 else:
                     web_text = str(web_result)
                     references_text = ""
@@ -278,25 +298,63 @@ def build_langgraph_workflow(pdf_tool=None, use_knowledge_base=True):
         return {**state, "info_sufficient": is_sufficient, "judge_reason": judge.strip(), "progress_log": progress_log}
 
     def generate_answers_node(state):
-        progress_log = append_progress(state, "🟡 [LangGraph] กำลังสร้างคำตอบ (Generating answer)...")
+        progress_log = append_progress(state, "🟡 [LangGraph] กำลังสร้างคำตอบหลายแบบ (Generating multiple answers)...")
         refined = state.get("refined_question", "")
         context = state.get("retrieved", "")
         system = agents_config['answer_candidate_agent']['role'] + "\n" + agents_config['answer_candidate_agent']['goal']
-        prompt = (
-            f"Using the following context, write ONE comprehensive, structured answer to the question.\n"
-            f"Context: {context}\n"
-            f"Question: {refined}\n"
-            f"\nข้อกำหนด:\n"
-            f"- ต้องเป็นการวิเคราะห์เชิงกฎหมายภายใต้ PDPA ของไทยเท่านั้น\n"
-            f"- หากข้อมูลไม่เพียงพอ ระบุว่า 'ข้อมูลไม่เพียงพอ' และแนะนำทางปฏิบัติ\n"
-            f"- ตอบครบทุกประเด็นของคำถามและอ้างอิงมาตราอย่างชัดเจน\n"
-            f"- จัดรูปแบบเป็นหัวข้อย่อย กระชับ อ่านง่าย (ภาษาไทย)\n"
-        )
-        answer = call_llm(prompt, system=system).strip()
-        progress_log = append_progress({"progress_log": progress_log}, "🟢 [LangGraph] สร้างคำตอบเสร็จแล้ว (Single answer generated)")
-        return {**state, "best_answer": answer, "progress_log": progress_log}
 
-    # Ranking step removed entirely; generation already yields single best answer
+        num_candidates = 3
+        candidates = []
+        for i in range(num_candidates):
+            prompt = (
+                f"Using the following context, write ONE comprehensive, structured answer to the question.\n"
+                f"Context: {context}\n"
+                f"Question: {refined}\n"
+                f"\nข้อกำหนด:\n"
+                f"- ต้องเป็นการวิเคราะห์เชิงกฎหมายภายใต้ PDPA ของไทยเท่านั้น\n"
+                f"- หากข้อมูลไม่เพียงพอ ระบุว่า 'ข้อมูลไม่เพียงพอ' และแนะนำทางปฏิบัติ\n"
+                f"- ตอบครบทุกประเด็นของคำถามและอ้างอิงมาตราอย่างชัดเจน\n"
+                f"- จัดรูปแบบเป็นหัวข้อย่อย กระชับ อ่านง่าย (ภาษาไทย)\n"
+                f"- คำตอบนี้ต้องมีมุมมองหรือโครงสร้างที่แตกต่างจากคำตอบอื่น ๆ (หากมี)\n"
+                f"\nอย่าอ้างอิงถึงคำตอบอื่น และสร้างคำตอบเพียง 1 ชุดเท่านั้น\n"
+            )
+            try:
+                answer = call_llm(prompt, system=system).strip()
+            except Exception as e:
+                answer = f"ไม่สามารถสร้างคำตอบลำดับที่ {i+1} ได้: {e}"
+            candidates.append(answer)
+
+        progress_log = append_progress({"progress_log": progress_log}, f"🟢 [LangGraph] สร้างคำตอบเสร็จแล้ว {len(candidates)} แบบ (Candidates ready)")
+        return {**state, "candidates": candidates, "progress_log": progress_log}
+
+    def decision_ranking_node(state):
+        progress_log = append_progress(state, "🟡 [LangGraph] จัดอันดับคำตอบ (Ranking candidates)...")
+        candidates = state.get("candidates", [])
+        refined = state.get("refined_question", "")
+        if not candidates:
+            progress_log = append_progress({"progress_log": progress_log}, "🟡 [LangGraph] ไม่มี candidates สำหรับจัดอันดับ")
+            return {**state, "ranked": [], "best_answer": state.get("best_answer", ""), "progress_log": progress_log}
+
+        system = agents_config['decision_ranking_agent']['role'] + "\n" + agents_config['decision_ranking_agent']['goal']
+        indexed = "\n".join([f"[{i+1}]\n{c}" for i, c in enumerate(candidates)])
+        prompt = (
+            f"Evaluate the following candidate answers for the question and return ONLY a comma-separated list of indices from best to worst (e.g., 2,1,3).\n"
+            f"Question: {refined}\n"
+            f"Candidates:\n{indexed}\n"
+            f"\nตอบเฉพาะหมายเลขดัชนีคั่นด้วยจุลภาคเท่านั้น (เช่น 2,1,3) เป็นภาษาไทยหรืออังกฤษก็ได้ แต่ห้ามมีข้อความอื่น"
+        )
+        order_text = call_llm(prompt, system=system)
+        import re
+        nums = re.findall(r"\d+", order_text)
+        order = [int(n)-1 for n in nums if 1 <= int(n) <= len(candidates)]
+        # Ensure we have a full permutation; append any missing indices in original order
+        missing = [i for i in range(len(candidates)) if i not in order]
+        order.extend(missing)
+
+        ranked = [candidates[i] for i in order]
+        best_answer = ranked[0] if ranked else ""
+        progress_log = append_progress({"progress_log": progress_log}, "🟢 [LangGraph] จัดอันดับคำตอบเสร็จแล้ว (Ranking done)")
+        return {**state, "ranked": ranked, "candidates": ranked, "best_answer": best_answer, "progress_log": progress_log}
 
     def response_node(state):
         progress_log = append_progress(state, "🟡 [LangGraph] กำลังสรุปคำตอบ (Synthesizing response)...")
@@ -341,7 +399,7 @@ def build_langgraph_workflow(pdf_tool=None, use_knowledge_base=True):
     graph.add_node("websearch", websearch_node)
     graph.add_node("judge_info", judge_info_node)
     graph.add_node("generate_answers", generate_answers_node)
-    # select_best node removed
+    graph.add_node("decision_ranking", decision_ranking_node)
     graph.add_node("response", response_node)
 
     # Wiring: retrieval -> judge_info
@@ -359,8 +417,9 @@ def build_langgraph_workflow(pdf_tool=None, use_knowledge_base=True):
     )
     # After websearch, judge again
     graph.add_edge("websearch", "judge_info")
-    # After info is sufficient, continue as before
-    graph.add_edge("generate_answers", "response")
+    # After info is sufficient, continue with ranking then response
+    graph.add_edge("generate_answers", "decision_ranking")
+    graph.add_edge("decision_ranking", "response")
     graph.set_finish_point("response")
 
     return graph.compile()
