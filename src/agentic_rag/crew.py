@@ -14,35 +14,34 @@ except ImportError:
     SerperDevTool = None
     logging.warning("SerperDevTool not installed. Please check serper_tool.py if you want web search.")
 
-# Add Ollama Python client
+# Add OpenAI-compatible client (for llama.cpp server)
 try:
-    from ollama import chat as ollama_chat, Client as OllamaClient
+    from openai import OpenAI
 except ImportError:
-    ollama_chat = None
-    OllamaClient = None
-    logging.warning("Ollama Python client not installed. Please install with 'pip install ollama'.")
+    OpenAI = None
+    logging.warning("OpenAI client not installed. Please install with 'pip install openai'.")
 
 OLLAMA_MODEL = "hf.co/scb10x/typhoon2.1-gemma3-4b-gguf:Q4_K_M"
-OLLAMA_HOST = "http://localhost:11434"
+LLAMA_CPP_BASE_URL = "http://localhost:8080/v1"
 
 AGENTS_YAML = os.path.join(os.path.dirname(__file__), 'config', 'agents.yaml')
 TASKS_YAML = os.path.join(os.path.dirname(__file__), 'config', 'tasks.yaml')
 
-# Helper to call Ollama LLM
+# Helper to call llama.cpp (OpenAI-compatible) LLM
 
 def call_llm(prompt, system=None):
-    if OllamaClient is None:
-        raise ImportError("Ollama Python client not installed.")
+    if OpenAI is None:
+        raise ImportError("OpenAI client not installed. Run: pip install openai")
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    client = OllamaClient(host=OLLAMA_HOST)
-    response = client.chat(
+    client = OpenAI(base_url=LLAMA_CPP_BASE_URL, api_key="not-needed")
+    response = client.chat.completions.create(
         model=OLLAMA_MODEL,
         messages=messages
     )
-    return response['message']['content']
+    return response.choices[0].message.content
 
 
 def build_langgraph_workflow(pdf_tool=None, use_knowledge_base=True):

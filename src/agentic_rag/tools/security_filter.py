@@ -1,6 +1,19 @@
+import os
 import re
 from typing import Dict, List, Tuple, Optional
 import logging
+
+# Optional: Guardrails profanity validator
+try:
+    from guardrails.validators import ProfanityFree  # type: ignore
+except Exception:  # pragma: no cover
+    ProfanityFree = None  # type: ignore
+
+# Optional: OpenAI-compatible client for llama.cpp server
+try:
+    from openai import OpenAI  # type: ignore
+except Exception:  # pragma: no cover
+    OpenAI = None  # type: ignore
 
 class SecurityFilter:
     """
@@ -8,6 +21,24 @@ class SecurityFilter:
     """
     
     def __init__(self):
+        # --- External integrations configuration ---
+        self.llama_base_url = os.getenv("LLAMA_CPP_BASE_URL", "http://localhost:8080/v1")
+        self.llama_model = os.getenv("LLAMA_CPP_MODEL", os.getenv("OLLAMA_MODEL", "hf.co/scb10x/typhoon2.1-gemma3-4b-gguf:Q4_K_M"))
+        self._openai_client = None
+        if OpenAI is not None:
+            try:
+                # llama.cpp server ignores api_key by default; set stub
+                self._openai_client = OpenAI(base_url=self.llama_base_url, api_key=os.getenv("OPENAI_API_KEY", "not-needed"))
+            except Exception:
+                self._openai_client = None
+
+        # Guardrails profanity validator instance (optional)
+        self._profanity_validator = None
+        if ProfanityFree is not None:
+            try:
+                self._profanity_validator = ProfanityFree()
+            except Exception:
+                self._profanity_validator = None
         # Realguide-style inappropriate patterns - only truly inappropriate content
         # 1) Define Thai inappropriate terms as a list for maintainability
         self.thai_inappropriate_terms = [
@@ -112,73 +143,8 @@ class SecurityFilter:
             drug_en_pattern,
         ]
         
-        # PDPA-related keywords (allowed topics)
-        self.pdpa_keywords = [
-            # Thai PDPA terms
-            "PDPA", "Personal Data Protection Act", "คุ้มครองข้อมูลส่วนบุคคล", "พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล", 
-            "ข้อมูลส่วนบุคคล", "data controller", "data processor", "ผู้ควบคุมข้อมูล", "ผู้ประมวลผลข้อมูล",
-            "สิทธิเจ้าของข้อมูล", "การประมวลผลข้อมูล", "การเก็บรวบรวมข้อมูล", "ฐานทางกฎหมาย",
-            "มาตรา","การแจ้งเตือน", "การขอความยินยอม", "การถอนความยินยอม", "การโอนข้อมูล", "การส่งข้อมูลไปต่างประเทศ",
-            "การรักษาความปลอดภัย", "การแจ้งเหตุ", "การแจ้งเตือน", "การขอความยินยอม", "การถอนความยินยอม",
-            "การโอนข้อมูล", "การส่งข้อมูลไปต่างประเทศ", "การรักษาความปลอดภัย", "การแจ้งเหตุ",
-            "คณะกรรมการคุ้มครองข้อมูลส่วนบุคคล", "สำนักงานคณะกรรมการคุ้มครองข้อมูลส่วนบุคคล",
-            "เจ้าหน้าที่คุ้มครองข้อมูลส่วนบุคคล", "ผู้ตรวจสอบ", "การตรวจสอบ", "การลงโทษ",
-            "ค่าปรับ", "โทษทางอาญา", "โทษทางแพ่ง", "การฟ้องร้อง", "การชดเชย",
-            # Security-related PDPA terms
-            "การแฮกข้อมูลส่วนบุคคล", "การแฮคข้อมูลส่วนบุคคล", "การเจาะข้อมูลส่วนบุคคล",
-            "การรั่วไหลข้อมูลส่วนบุคคล", "การรั่วไหลของข้อมูลส่วนบุคคล", "การรั่วไหลข้อมูล",
-            "การรั่วไหลของข้อมูล", "การขโมยข้อมูลส่วนบุคคล", "การขโมยข้อมูล",
-            "การโจมตีข้อมูลส่วนบุคคล", "การโจมตีข้อมูล", "การบุกรุกข้อมูลส่วนบุคคล",
-            "การบุกรุกข้อมูล", "การแจ้งเหตุรั่วไหลข้อมูล", "การแจ้งเหตุรั่วไหลข้อมูลส่วนบุคคล",
-            "การแจ้งเหตุการรั่วไหลข้อมูล", "การแจ้งเหตุการรั่วไหลข้อมูลส่วนบุคคล",
-            "มาตรการรักษาความปลอดภัยข้อมูล", "มาตรการรักษาความปลอดภัยข้อมูลส่วนบุคคล",
-            "การป้องกันข้อมูลส่วนบุคคล", "การป้องกันข้อมูล", "การรักษาความปลอดภัยข้อมูล",
-            "การรักษาความปลอดภัยข้อมูลส่วนบุคคล", "การคุ้มครองข้อมูลส่วนบุคคล",
-            "การคุ้มครองข้อมูล", "การป้องกันการรั่วไหลข้อมูล", "การป้องกันการรั่วไหลข้อมูลส่วนบุคคล",
-            # English PDPA terms
-            "personal data", "data protection", "data privacy", "data controller", "data processor",
-            "data subject", "data subject rights", "consent", "withdrawal of consent", "data processing",
-            "data collection", "data transfer", "cross-border data transfer", "data security",
-            "data breach", "data breach notification", "data protection officer", "DPO",
-            "data protection impact assessment", "DPIA", "legitimate interest", "legal basis",
-            "data minimization", "purpose limitation", "storage limitation", "accuracy",
-            "integrity and confidentiality", "accountability", "transparency",
-            "right to access", "right to rectification", "right to erasure", "right to be forgotten",
-            "right to data portability", "right to object", "right to restrict processing",
-            "automated decision making", "profiling", "sensitive personal data", "special categories",
-            "children's data", "employee data", "customer data", "vendor data", "third party data",
-            "data sharing", "data disclosure", "data retention", "data disposal", "data destruction",
-            "privacy policy", "privacy notice", "terms of service", "data processing agreement",
-            "binding corporate rules", "standard contractual clauses", "adequacy decision",
-            "supervisory authority", "data protection authority", "enforcement", "penalties",
-            "fines", "administrative fines", "criminal penalties", "civil remedies",
-            "compensation", "damages", "injunction", "cease and desist", "audit", "inspection",
-            # English security-related PDPA terms
-            "data breach", "data breach notification", "personal data breach", "data security breach",
-            "data theft", "personal data theft", "data intrusion", "personal data intrusion",
-            "data attack", "personal data attack", "data breach notification", "breach notification",
-            "data security measures", "personal data security", "data protection measures",
-            "data security", "personal data security", "data protection security",
-            "data breach response", "personal data breach response", "breach response plan",
-            "data incident response", "personal data incident response", "incident response",
-            "data security incident", "personal data security incident", "security incident",
-            "data protection incident", "personal data protection incident", "protection incident",
-            # Image and visual data related terms
-            "ภาพถ่าย", "ถ่ายภาพ", "รูปภาพ", "รูปถ่าย", "ภาพ", "การถ่ายภาพ", "การถ่ายรูป",
-            "การแอบถ่าย", "แอบถ่าย", "ถ่ายโดยไม่ได้รับอนุญาต", "ถ่ายโดยไม่ยินยอม",
-            "การเผยแพร่ภาพ", "เผยแพร่ภาพ", "การโพสต์ภาพ", "โพสต์ภาพ", "การแชร์ภาพ", "แชร์ภาพ",
-            "การลงเน็ต", "ลงเน็ต", "การอัปโหลด", "อัปโหลด", "การเผยแพร่", "เผยแพร่",
-            "การละเมิดความเป็นส่วนตัว", "ละเมิดความเป็นส่วนตัว", "การบุกรุกความเป็นส่วนตัว",
-            "บุกรุกความเป็นส่วนตัว", "การรุกล้ำความเป็นส่วนตัว", "รุกล้ำความเป็นส่วนตัว",
-            "การถ่ายภาพโดยไม่ได้รับอนุญาต", "การถ่ายภาพโดยไม่ยินยอม", "การถ่ายภาพโดยไม่ได้รับความยินยอม",
-            "การถ่ายภาพโดยไม่ได้รับอนุญาต", "การถ่ายภาพโดยไม่ยินยอม", "การถ่ายภาพโดยไม่ได้รับความยินยอม",
-            "photo", "photograph", "image", "picture", "taking photos", "photography", "camera",
-            "unauthorized photography", "unauthorized photo", "unauthorized image", "unauthorized picture",
-            "without consent", "without permission", "privacy violation", "privacy breach",
-            "image sharing", "photo sharing", "image posting", "photo posting", "image upload",
-            "photo upload", "image publication", "photo publication", "image dissemination",
-            "photo dissemination", "image distribution", "photo distribution"
-        ]
+        # PDPA keyword heuristic disabled: rely on AI check only
+        self.pdpa_keywords = []
         
         # Compile regex patterns for efficiency
         self.inappropriate_regex = re.compile('|'.join(self.inappropriate_patterns), re.IGNORECASE)
@@ -205,7 +171,8 @@ class SecurityFilter:
     
     def check_content_safety(self, text: str) -> Tuple[bool, List[str]]:
         """
-        Realguide-style content safety check - only block truly inappropriate content.
+        Content safety check using Guardrails profanity validator if available,
+        with fallback to regex-based detection of severe profanity/violence, etc.
         
         Args:
             text: The text to check
@@ -218,19 +185,48 @@ class SecurityFilter:
         
         violations = []
         text_lower = text.lower()
+
+        # 0) Prefer Guardrails' ProfanityFree if available
+        if self._profanity_validator is not None:
+            try:
+                # Guardrails validators typically expose a __call__/validate-like interface; support both
+                is_clean = True
+                message = None
+                if hasattr(self._profanity_validator, "validate"):
+                    result = self._profanity_validator.validate(text_lower)  # type: ignore
+                    # Try to interpret common result shapes
+                    if isinstance(result, tuple) and len(result) >= 2:
+                        # (validated_value, error)
+                        _, err = result[0], result[1]
+                        is_clean = err is None
+                        message = None if err is None else str(err)
+                    elif isinstance(result, dict):
+                        # {is_valid: bool, error: str}
+                        is_clean = bool(result.get("is_valid", True))
+                        message = result.get("error")
+                    else:
+                        # If no error thrown, assume valid
+                        is_clean = True
+                else:
+                    # Attempt callable
+                    _ = self._profanity_validator(text_lower)  # type: ignore
+                    is_clean = True
+
+                if not is_clean:
+                    violations.append("ตรวจพบคำหยาบจาก Guardrails Profanity validator" if not message else message)
+            except Exception:
+                # If guardrails call fails, continue with regex fallback
+                pass
         
-        # Only check for truly inappropriate content (profanity, extreme violence, etc.)
-        # Remove overly restrictive security term blocking
+        # 1) Regex-based fallback for inappropriate content
         matches = self.inappropriate_regex.findall(text_lower)
         if matches:
-            # Flatten the matches list since regex groups return tuples
             flat_matches = []
             for match in matches:
                 if isinstance(match, tuple):
                     flat_matches.extend([m for m in match if m])
                 else:
                     flat_matches.append(match)
-            
             if flat_matches:
                 violations.append(f"พบคำที่ไม่เหมาะสม: {', '.join(set(flat_matches))}")
         
@@ -256,6 +252,43 @@ class SecurityFilter:
             self.logger.warning(f"Content safety violation detected: {violations}")
         
         return is_safe, violations
+
+    def _ai_check_pdpa_related(self, text: str) -> Tuple[bool, str]:
+        """
+        Determine PDPA-relatedness using ONLY the AI judgment (per request).
+        If the AI is not available, treat as not related and ask user to ask about PDPA.
+        Returns (is_related, reason_text).
+        """
+        if not text or self._openai_client is None:
+            return False, "AI unavailable for PDPA check"
+
+        try:
+            system = (
+                "คุณเป็นผู้ช่วยด้านกฎหมายไทย ทำหน้าที่ตรวจสอบข้อความที่ผู้ใช้ถามมา "
+                "โดยระบุว่าเกี่ยวข้องกับ PDPA (พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล) หรือไม่ "
+                "หากเกี่ยวข้อง ให้ตอบ 'เกี่ยวข้อง' พร้อมคำอธิบายสั้นๆว่าทำไม เช่น "
+                "กรณีถ่ายรูปแล้วบังเอิญติดคนอื่นไปด้วยแล้วนำไปโพสต์ ถือว่าเกี่ยวข้อง "
+                "เพราะเป็นการเผยแพร่ข้อมูลส่วนบุคคลโดยไม่ได้รับความยินยอม. "
+                "หากไม่เกี่ยวข้อง ให้ตอบ 'ไม่เกี่ยวข้อง' พร้อมเหตุผลสั้นๆ"
+            )
+            prompt = f"ข้อความ: {text}\nโปรดตอบรูปแบบสั้น ๆ ตามที่กำหนดเท่านั้น"
+            resp = self._openai_client.chat.completions.create(
+                model=self.llama_model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                max_tokens=64,
+                temperature=0
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            norm = content.replace("\u200b", "").strip().lower()
+            # Accept either original Y:/N: format or Thai keywords
+            if norm.startswith("y:") or norm.startswith("เกี่ยวข้อง"):
+                return True, content
+            if norm.startswith("n:") or norm.startswith("ไม่เกี่ยวข้อง"):
+                return False, content
+            # If AI didn't follow format, default to not related
+            return False, content or "ไม่เข้าใจรูปแบบคำตอบจาก AI"
+        except Exception as e:
+            return False, "AI error during PDPA check"
 
     def _is_severe_profanity(self, text: str, violations: List[str]) -> bool:
         """
@@ -421,12 +454,17 @@ class SecurityFilter:
             result["violations"].extend(safety_violations)
             return result
 
-        # --- ด่านที่ 3: ตรวจสอบว่าหัวข้อเกี่ยวข้องกับ PDPA หรือไม่ ---
-        is_pdpa_related, topic_reasons = self.check_topic_restriction(user_input)
+        # --- ด่านที่ 3: ตรวจสอบว่าหัวข้อเกี่ยวข้องกับ PDPA หรือไม่ (ใช้ AI ถ้ามี) ---
+        is_pdpa_related, reason_text = self._ai_check_pdpa_related(user_input)
         if not is_pdpa_related:
             result["should_respond"] = False
-            result["response_message"] = "ขออภัยค่ะ ฉันสามารถให้ข้อมูลที่เกี่ยวข้องกับ พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล (PDPA) เท่านั้น"
-            result["reasons"].extend(topic_reasons)
+            # แสดงข้อมูลเกี่ยวกับ PDPA สั้น ๆ เพื่อแนะแนว
+            result["response_message"] = (
+                "🔴 หัวข้อนี้ไม่เกี่ยวข้องกับ PDPA\n\n"
+                f"เหตุผลการประเมิน: {reason_text}"
+            )
+            if reason_text:
+                result["reasons"].append(reason_text)
             return result
 
         # --- ถ้าผ่านทุกด่าน ถือว่า Input ปลอดภัยและเกี่ยวข้อง ---
