@@ -14,9 +14,11 @@ pip install -r requirements.txt
    - macOS: `brew install tesseract`
    - Linux: `sudo apt-get install tesseract-ocr`
 
-3. ตั้งค่า llama.cpp:
+3. ตั้งค่า Ollama:
 ```bash
-   winget install llama.cpp
+# ติดตั้ง Ollama จาก https://ollama.ai/
+# รัน model ที่ต้องการ
+ollama pull hf.co/Float16-cloud/typhoon2-qwen2.5-7b-instruct-gguf:Q8_0
 ```
 
 4. ตั้งค่า API Keys (ไม่บังคับ):
@@ -28,8 +30,10 @@ SERPER_API_KEY=your_serper_api_key_here
 
 ## การใช้งาน
 
-รันแอปพลิเคชัน: รันไฟล์ llm.bat และ run.bat 
-
+รันแอปพลิเคชัน:
+```bash
+streamlit run app_llama3.2.py
+```
 
 ## คุณสมบัติ
 
@@ -52,3 +56,16 @@ SERPER_API_KEY=your_actual_api_key_here
 ```bash
 pip install serper-dev
 ```
+
+## โครงสร้างโปรเจค
+
+```
+agentic_rag/
+├── app_llama3.2.py          # Streamlit app หลัก
+├── src/agentic_rag/
+│   ├── crew.py              # LangGraph workflow
+│   ├── tools/               # Custom tools
+│   └── config/              # Configuration files
+├── knowledge/               # ฐานความรู้ PDPA
+└── assets/                  # รูปภาพและไฟล์อื่นๆ
+``` 

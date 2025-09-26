@@ -39,7 +39,8 @@ def call_llm(prompt, system=None):
     client = OpenAI(base_url=LLAMA_CPP_BASE_URL, api_key="not-needed")
     response = client.chat.completions.create(
         model=OLLAMA_MODEL,
-        messages=messages
+        messages=messages,
+        max_tokens=8192
     )
     return response.choices[0].message.content
 

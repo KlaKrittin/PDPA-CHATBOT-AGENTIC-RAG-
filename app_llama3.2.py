@@ -1,5 +1,8 @@
 import streamlit as st
 import os
+import uuid
+import atexit
+import signal
 import gc
 import base64
 import time
@@ -18,6 +21,10 @@ except ImportError:
     st.warning("SerperDevTool not available. Please check serper_tool.py for web search.")
 from src.agentic_rag.tools.custom_tool import DocumentSearchTool
 from src.agentic_rag.crew import build_langgraph_workflow
+try:
+    from src.agentic_rag.tools.chat_history import ChatHistoryStore
+except Exception:
+    ChatHistoryStore = None
 import pytesseract
 
 # Premium Deep Modern CSS & Layout
@@ -307,6 +314,41 @@ def create_agents_and_tasks(pdf_tool, use_knowledge_base=True, file_query_mode=F
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+    # Mirror to module-level for cleanup without Streamlit context
+    try:
+        CHAT_SESSION_ID = st.session_state.session_id
+    except Exception:
+        CHAT_SESSION_ID = None
+
+if "chat_store" not in st.session_state:
+    try:
+        if ChatHistoryStore is not None:
+            qdrant_url = os.getenv("QDRANT_URL2")
+            qdrant_api_key = os.getenv("QDRANT_API_KEY2")
+            if qdrant_url:
+                st.session_state.chat_store = ChatHistoryStore(
+                    collection_name="rag_chat_history",
+                    qdrant_url=qdrant_url,
+                    qdrant_api_key=qdrant_api_key,
+                )
+                # Mirror to module-level for cleanup without Streamlit context
+                try:
+                    CHAT_STORE_REF = st.session_state.chat_store
+                except Exception:
+                    CHAT_STORE_REF = None
+                # Load existing messages for this session
+                st.session_state.messages = st.session_state.chat_store.list_messages(st.session_state.session_id)
+            else:
+                st.session_state.chat_store = None
+                st.info("Chat history disabled. Set QDRANT_URL2 to enable Qdrant-backed history.")
+        else:
+            st.session_state.chat_store = None
+    except Exception as e:
+        st.warning(f"Chat history store unavailable: {e}")
+        st.session_state.chat_store = None
+
 if "pdf_tool" not in st.session_state:
     st.session_state.pdf_tool = None
 
@@ -351,8 +393,45 @@ def build_conversation_context(messages, max_turns=3):
 
 def reset_chat():
     """ล้างประวัติการสนทนา"""
+    try:
+        if st.session_state.get("chat_store") and st.session_state.get("session_id"):
+            st.session_state.chat_store.reset_session(st.session_state.session_id)
+    except Exception as e:
+        st.warning(f"ไม่สามารถล้างแชตบน Qdrant ได้: {e}")
     st.session_state.messages = []
     perform_periodic_gc()
+
+
+# ===========================
+#   Cleanup on Exit
+# ===========================
+def _cleanup_on_exit():
+    # Use module-level references to avoid Streamlit ScriptRunContext at exit
+    try:
+        mode = os.getenv("CHAT_HISTORY_CLEANUP_MODE", "session").lower()
+        chat_store = globals().get("CHAT_STORE_REF")
+        session_id = globals().get("CHAT_SESSION_ID")
+        if chat_store:
+            if mode == "collection":
+                chat_store.drop_collection()
+            elif session_id:
+                chat_store.reset_session(session_id)
+    except Exception:
+        pass
+
+
+def _signal_handler(signum, frame):
+    _cleanup_on_exit()
+    raise SystemExit(0)
+
+
+atexit.register(_cleanup_on_exit)
+try:
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+except Exception:
+    # Some environments may not allow signal handling
+    pass
 
 def perform_periodic_gc():
     """ทำ garbage collection เพื่อลดการใช้หน่วยความจำ"""
@@ -484,6 +563,15 @@ if prompt:
     
     # แสดงคำถามของผู้ใช้ก่อนที่จะตรวจสอบ SecurityFilter
     st.session_state.messages.append({"role": "user", "content": prompt})
+    try:
+        if st.session_state.get("chat_store"):
+            st.session_state.chat_store.add_message(
+                session_id=st.session_state.session_id,
+                role="user",
+                content=prompt,
+            )
+    except Exception as e:
+        st.warning(f"บันทึกประวัติผู้ใช้ไม่สำเร็จ: {e}")
     with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
     
@@ -707,6 +795,15 @@ if prompt:
     
     # 4. บันทึกข้อความของผู้ช่วยไปยังเซสชัน (ใช้คำตอบที่ดีที่สุด)
     st.session_state.messages.append({"role": "assistant", "content": best_answer})
+    try:
+        if st.session_state.get("chat_store"):
+            st.session_state.chat_store.add_message(
+                session_id=st.session_state.session_id,
+                role="assistant",
+                content=best_answer,
+            )
+    except Exception as e:
+        st.warning(f"บันทึกประวัติผู้ช่วยไม่สำเร็จ: {e}")
     
     # 5. ทำ garbage collection ทุกรอบการสนทนา
     perform_periodic_gc()
